@@ -25,6 +25,10 @@ params.bismark_index = params.genome ? params.genomes[ params.genome ].bismark ?
 params.bwa_meth_index = params.genome ? params.genomes[ params.genome ].bwa_meth ?: false : false
 params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 params.fasta_index = params.genome ? params.genomes[ params.genome ].fasta_index ?: false : false
+params.bowtie2 = false
+// For custom adapters (NuGen)
+params.r1_adapter = false
+params.r2_adapter = false
 
 // Validate inputs
 if (params.aligner != 'bismark' && params.aligner != 'bwameth'){
@@ -76,6 +80,7 @@ params.epignome = false
 params.accel = false
 params.zymo = false
 params.cegx = false
+params.nugen = false
 if(params.pbat){
     params.clip_r1 = 6
     params.clip_r2 = 9
@@ -101,6 +106,16 @@ if(params.pbat){
     params.clip_r2 = 6
     params.three_prime_clip_r1 = 2
     params.three_prime_clip_r2 = 2
+} else if(params.nugen){
+    // this overrides custom adapters and a few other options for now, can maybe move to config?
+    params.rrbs = false
+    params.r1_adapter = 'AGATCGGAAGAGC'
+    params.r2_adapter = 'AAATCAAAAAAAC'
+    params.clip_r1 = 0
+    params.clip_r2 = 0
+    params.three_prime_clip_r1 = 0
+    params.three_prime_clip_r2 = 0
+    params.bowtie2 = true
 } else {
     params.clip_r1 = 0
     params.clip_r2 = 0
@@ -151,6 +166,7 @@ summary['Aligner']        = params.aligner
 summary['Data Type']      = params.singleEnd ? 'Single-End' : 'Paired-End'
 summary['Genome']         = params.genome
 if(params.bismark_index) summary['Bismark Index'] = params.bismark_index
+if(params.bowtie2) summary['Bismark Bowtie2'] = params.bowtie2
 if(params.bwa_meth_index) summary['BWA-Meth Index'] = "${params.bwa_meth_index}*"
 else if(params.fasta)    summary['Fasta Ref'] = params.fasta
 if(params.rrbs) summary['RRBS Mode'] = 'On'
@@ -162,6 +178,7 @@ if(params.epignome)     summary['Trim Profile'] = 'TruSeq (EpiGnome)'
 if(params.accel)        summary['Trim Profile'] = 'Accel-NGS (Swift)'
 if(params.zymo)         summary['Trim Profile'] = 'Zymo Pico-Methyl'
 if(params.cegx)         summary['Trim Profile'] = 'CEGX'
+if(params.nugen)        summary['Trim Profile'] = 'NuGen'
 summary['Trim R1'] = params.clip_r1
 summary['Trim R2'] = params.clip_r2
 summary["Trim 3' R1"] = params.three_prime_clip_r1
@@ -189,6 +206,8 @@ summary['Working dir']    = workflow.workDir
 summary['Output dir']     = params.outdir
 summary['Script dir']     = workflow.projectDir
 summary['Config Profile'] = workflow.profile
+if(params.r1_adapter) summary['Custom R1 adapter'] = params.r1_adapter
+if(params.r2_adapter) summary['Custom R2 adapter'] = params.r2_adapter
 if(params.project) summary['UPPMAX Project'] = params.project
 if(params.email) summary['E-mail Address'] = params.email
 log.info summary.collect { k,v -> "${k.padRight(18)}: $v" }.join("\n")
@@ -338,13 +357,49 @@ if(params.notrim){
         tpc_r1 = params.three_prime_clip_r1 > 0 ? "--three_prime_clip_r1 ${params.three_prime_clip_r1}" : ''
         tpc_r2 = params.three_prime_clip_r2 > 0 ? "--three_prime_clip_r2 ${params.three_prime_clip_r2}" : ''
         rrbs = params.rrbs ? "--rrbs" : ''
+        r1_adapter = params.r1_adapter ? "-a ${params.r1_adapter}" : ''
+        r2_adapter = params.r2_adapter ? "-a2 ${params.r2_adapter}" : ''
         if (params.singleEnd) {
             """
-            trim_galore --fastqc --gzip $rrbs $c_r1 $tpc_r1 $reads
+            trim_galore --fastqc --gzip $r1_adapter $rrbs $c_r1 $tpc_r1 $reads
             """
         } else {
             """
-            trim_galore --paired --fastqc --gzip $rrbs $c_r1 $c_r2 $tpc_r1 $tpc_r2 $reads
+            trim_galore --paired --fastqc --gzip $r1_adapter $r2_adapter $rrbs $c_r1 $c_r2 $tpc_r1 $tpc_r2 $reads
+            """
+        }
+    }
+}
+
+// NuGen only pre-aln processing
+
+if(params.nugen){
+    divtrim_reads = trimmed_reads.clone()
+    process nugen_divtrimming {
+        tag "$name"
+        publishDir "${params.outdir}/NuGen-diversity-trimming", mode: 'copy',
+            saveAs: {filename ->
+                if (filename.indexOf("_fastqc") > 0) "FastQC/$filename"
+                else if (filename.indexOf("trimming_report.txt") > 0) "logs/$filename"
+                else params.saveTrimmed ? filename : null
+            }
+
+        input:
+        set val(name), file(trimmed) from trimmed_reads
+
+        output:
+        set val(name), file('*fq.gz') into divtrimmed_reads
+
+        script:
+        if (params.singleEnd) {
+            """
+            python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py \\
+                -1 $reads
+            """
+        } else {
+            """
+            python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py \\
+                -1 $reads[0] -2 $reads[1]
             """
         }
     }
@@ -353,6 +408,7 @@ if(params.notrim){
 /*
  * STEP 3.1 - align with Bismark
  */
+
 if(params.aligner == 'bismark'){
     process bismark_align {
         tag "$name"
@@ -377,6 +433,7 @@ if(params.aligner == 'bismark'){
         non_directional = params.single_cell || params.zymo || params.non_directional ? "--non_directional" : ''
         unmapped = params.unmapped ? "--unmapped" : ''
         mismatches = params.relaxMismatches ? "--score_min L,0,-${params.numMismatches}" : ''
+        bt2 = params.bowtie2 ? "--bowtie2" : ''
         multicore = ''
         if (task.cpus){
             // Numbers based on recommendation by Felix for a typical mouse genome
@@ -404,14 +461,14 @@ if(params.aligner == 'bismark'){
         if (params.singleEnd) {
             """
             bismark \\
-                --bam $pbat $non_directional $unmapped $mismatches $multicore \\
+                --bam $bt2 $pbat $non_directional $unmapped $mismatches $multicore \\
                 --genome $index \\
                 $reads
             """
         } else {
             """
             bismark \\
-                --bam $pbat $non_directional $unmapped $mismatches $multicore \\
+                --bam $bt2 $pbat $non_directional $unmapped $mismatches $multicore \\
                 --genome $index \\
                 -1 ${reads[0]} \\
                 -2 ${reads[1]}
