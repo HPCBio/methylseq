@@ -26,9 +26,10 @@ params.bwa_meth_index = params.genome ? params.genomes[ params.genome ].bwa_meth
 params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 params.fasta_index = params.genome ? params.genomes[ params.genome ].fasta_index ?: false : false
 params.bowtie2 = false
-// For custom adapters (NuGen)
+// For custom adapters and barcode UMIs (NuGen)
 params.r1_adapter = false
 params.r2_adapter = false
+params.umi = false
 
 // Validate inputs
 if (params.aligner != 'bismark' && params.aligner != 'bwameth'){
@@ -107,6 +108,7 @@ if(params.pbat){
     params.three_prime_clip_r1 = 2
     params.three_prime_clip_r2 = 2
 } else if(params.nugen){
+    // TODO: this doesn't seem to work yet, nothing is set
     // this overrides custom adapters and a few other options for now, can maybe move to config?
     params.rrbs = false
     params.r1_adapter = 'AGATCGGAAGAGC'
@@ -146,6 +148,13 @@ if(params.readPaths){
         .fromFilePairs( params.reads, size: params.singleEnd ? 1 : 2 )
         .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --singleEnd on the command line." }
         .into { read_files_fastqc; read_files_trimming }
+}
+
+if (params.nugen && params.umi) {
+    Channel
+        .fromFilePairs( params.umi, size: 1 )
+        .ifEmpty { exit 1, "Cannot find any UMI barcode file: ${params.umi}\nNB: Path needs to be enclosed in quotes!" }
+        .into { umi_files }
 }
 
 log.info """=======================================================
@@ -254,10 +263,11 @@ if(!params.bismark_index && params.fasta && params.aligner == 'bismark'){
         file "BismarkIndex" into bismark_index
 
         script:
+        bt2 = params.bowtie2 ? "--bowtie2" : ''
         """
         mkdir BismarkIndex
         cp $fasta BismarkIndex/
-        bismark_genome_preparation BismarkIndex
+        bismark_genome_preparation $bt2 BismarkIndex
         """
     }
 }
@@ -330,8 +340,43 @@ process fastqc {
 /*
  * STEP 2 - Trim Galore!
  */
+
+// If we use NuGen, we should append the barcode to the corresponding read name for deduplication.
+
+if (params.nugen) {
+    process nugen_append {
+        tag "$name"
+        publishDir "${params.outdir}/NuGen_append", mode: 'copy',
+            saveAs: {filename ->
+                params.saveTrimmed ? filename : null
+            }
+
+        input:
+        set val(name), file(reads), file(barcode) from read_files_trimming.join(umi_files)
+
+        output:
+        set val(name), file('*fq.gz') into nugen_read_files_trimming
+
+        script:
+        if (params.singleEnd) {
+            """
+            python \$NUGEN_RRBS_HOME/append_barcodes.py -1 ${reads} \\
+                -b ${barcode}
+
+            """
+        } else {
+            """
+            python \$NUGEN_RRBS_HOME/append_barcodes.py -1 ${reads[0]} \\
+                -2 ${reads[1]} -b ${barcode}
+
+            """
+        }
+    }
+}
+
 if(params.notrim){
-    trimmed_reads = read_files_trimming
+    // trimmed_reads = read_files_trimming
+    trimmed_reads = (params.nugen ? nugen_read_files_trimming : read_files_trimming)
     trimgalore_results = Channel.from(false)
 } else {
     process trim_galore {
@@ -344,7 +389,9 @@ if(params.notrim){
             }
 
         input:
-        set val(name), file(reads) from read_files_trimming
+        set val(name), file(reads) from (params.nugen ? nugen_read_files_trimming : read_files_trimming)
+        //set val(name), file(reads) from read_files_trimming
+        // TODO: appending to read name doesn't work yet
 
         output:
         set val(name), file('*fq.gz') into trimmed_reads
@@ -372,36 +419,31 @@ if(params.notrim){
 }
 
 // NuGen only pre-aln processing
-
-if(params.nugen){
-    divtrim_reads = trimmed_reads.clone()
-    process nugen_divtrimming {
-        tag "$name"
-        publishDir "${params.outdir}/NuGen-diversity-trimming", mode: 'copy',
-            saveAs: {filename ->
-                if (filename.indexOf("_fastqc") > 0) "FastQC/$filename"
-                else if (filename.indexOf("trimming_report.txt") > 0) "logs/$filename"
-                else params.saveTrimmed ? filename : null
-            }
-
-        input:
-        set val(name), file(trimmed) from trimmed_reads
-
-        output:
-        set val(name), file('*fq.gz') into divtrimmed_reads
-
-        script:
-        if (params.singleEnd) {
-            """
-            python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py \\
-                -1 $reads
-            """
-        } else {
-            """
-            python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py \\
-                -1 $reads[0] -2 $reads[1]
-            """
+process nugen_divtrimming {
+    tag "$name"
+    publishDir "${params.outdir}/NuGen-diversity-trimming", mode: 'copy',
+        saveAs: {filename ->
+            params.saveTrimmed ? filename : null
         }
+
+    when:
+    params.nugen
+
+    input:
+    set val(name), file(trimmed) from trimmed_reads
+
+    output:
+    set val(name), file('*fq.gz') into divtrimmed_reads
+
+    script:
+    if (params.singleEnd) {
+        """
+        python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py -1 ${trimmed}
+        """
+    } else {
+        """
+        python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py -1 ${trimmed[0]} -2 ${trimmed[1]}
+        """
     }
 }
 
@@ -409,7 +451,7 @@ if(params.nugen){
  * STEP 3.1 - align with Bismark
  */
 
-if(params.aligner == 'bismark'){
+if(params.aligner == 'bismark') {
     process bismark_align {
         tag "$name"
         publishDir "${params.outdir}/bismark_alignments", mode: 'copy',
@@ -420,11 +462,11 @@ if(params.aligner == 'bismark'){
             }
 
         input:
-        set val(name), file(reads) from trimmed_reads
+        set val(name), file(reads) from (params.nugen ? divtrimmed_reads : trimmed_reads)
         file index from bismark_index.collect()
 
         output:
-        file "*.bam" into bam, bam_2
+        set val(name), file("*.bam") into bam, bam_2
         file "*report.txt" into bismark_align_log_1, bismark_align_log_2, bismark_align_log_3
         if(params.unmapped){ file "*.fq.gz" into bismark_unmapped }
 
@@ -484,6 +526,69 @@ if(params.aligner == 'bismark'){
         bismark_dedup_log_1 = Channel.from(false)
         bismark_dedup_log_2 = Channel.from(false)
         bismark_dedup_log_3 = Channel.from(false)
+    } else if (params.nugen && !params.nodedup) {
+        bismark_dedup_log_1 = Channel.from(false)
+        bismark_dedup_log_2 = Channel.from(false)
+        bismark_dedup_log_3 = Channel.from(false)
+
+        // TODO: check this
+        process nugen_samtools_sort {
+            tag "${bam.baseName}"
+            publishDir "${params.outdir}/NuGen_sort", mode: 'copy',
+                saveAs: {filename ->
+                    if (filename.indexOf(".txt") > 0) "logs/$filename"
+                    else if (params.saveAlignedIntermediates || params.nodedup || params.rrbs) "$filename"
+                    else null
+                }
+
+            input:
+            set val(name), file(bam) from bam
+
+            output:
+            set val(name), file("${name}.sorted.bam") into nugen_bam_sorted
+            file "${name}.sorted.bam.bai" into nugen_bam_index
+            file "${name}_flagstat.txt" into nugen_flagstat_results
+            file "${name}_stats.txt" into nugen_samtools_stats_results
+
+            script:
+            """
+            samtools sort \\
+                $bam \\
+                -m ${task.memory.toBytes() / task.cpus} \\
+                -@ ${task.cpus} \\
+                > ${name}.sorted.bam
+            samtools index ${name}.sorted.bam
+            samtools flagstat ${name}.sorted.bam > ${name}_flagstat.txt
+            samtools stats ${name}.sorted.bam > ${name}_stats.txt
+            """
+        }
+
+        process nugen_deduplicate {
+            tag "${bam.baseName}"
+            publishDir "${params.outdir}/NuGen_deduplicated", mode: 'copy',
+                saveAs: {filename ->
+                    if (filename.indexOf(".txt") > 0) "logs/$filename"
+                    else if (params.saveAlignedIntermediates) "$filename"
+                    else null}
+
+            input:
+            set val(name), file(bam) from nugen_bam_sorted
+            file bai from nugen_bam_index
+            // set val(name), file(bam), file(umi) from nugen_bam_sorted.join(umi_files)
+
+            output:
+            file "*.nugen_dedup.sorted.dedup.bam" into bam_dedup, bam_dedup_qualimap
+            file "*.nugen_dedup.sorted.dedup.bam" into bam_markdup, bam_markdup_qualimap
+            file "*.nugen_dedup_dup_log.txt" into nugen_dedup_log
+
+            script:
+            paired = !params.singleEnd ? "-2" : ''
+            """
+            samtools view -h -@ ${task.cpus} $bam > ${name}.sam
+
+            python \$NUGEN_NODUP_HOME/nudup.py $paired -o ${name}.nugen_dedup ${name}.sam
+            """
+        }
     } else {
         process bismark_deduplicate {
             tag "${bam.baseName}"
@@ -491,7 +596,7 @@ if(params.aligner == 'bismark'){
                 saveAs: {filename -> filename.indexOf(".bam") == -1 ? "logs/$filename" : "$filename"}
 
             input:
-            file bam
+            set val(name), file(bam) from bam
 
             output:
             file "${bam.baseName}.deduplicated.bam" into bam_dedup, bam_dedup_qualimap
@@ -613,7 +718,7 @@ if(params.aligner == 'bismark'){
         publishDir "${params.outdir}/bismark_summary", mode: 'copy'
 
         input:
-        file ('*') from bam_2.collect()
+        file ('*') from bam_2.map { it[1] } .collect()
         file ('*') from bismark_align_log_2.collect()
         file ('*') from bismark_dedup_log_2.collect()
         file ('*') from bismark_splitting_report_2.collect()
@@ -648,7 +753,7 @@ if(params.aligner == 'bwameth'){
             saveAs: { fn -> params.saveAlignedIntermediates ? fn : null }
 
         input:
-        set val(name), file(reads) from trimmed_reads
+        set val(name), file(reads) from (params.nugen ? divtrimmed_reads : trimmed_reads)
         file bwa_meth_indices from bwa_meth_indices.collect()
 
         output:
