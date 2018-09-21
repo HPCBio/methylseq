@@ -25,11 +25,11 @@ params.bismark_index = params.genome ? params.genomes[ params.genome ].bismark ?
 params.bwa_meth_index = params.genome ? params.genomes[ params.genome ].bwa_meth ?: false : false
 params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 params.fasta_index = params.genome ? params.genomes[ params.genome ].fasta_index ?: false : false
-params.bowtie2 = false
-// For custom adapters and barcode UMIs (NuGen)
-params.r1_adapter = false
-params.r2_adapter = false
-params.umi = false
+// params.bowtie2 = false
+// // For custom adapters and barcode UMIs (NuGen)
+// params.r1_adapter = false
+// params.r2_adapter = false
+// params.umi = false
 
 // Validate inputs
 if (params.aligner != 'bismark' && params.aligner != 'bwameth'){
@@ -421,9 +421,10 @@ if(params.notrim){
 // NuGen only pre-aln processing
 process nugen_divtrimming {
     tag "$name"
-    publishDir "${params.outdir}/NuGen-diversity-trimming", mode: 'copy',
+    publishDir "${params.outdir}/NuGen_diversity-trimming", mode: 'copy',
         saveAs: {filename ->
-            params.saveTrimmed ? filename : null
+            if (filename.indexOf(".txt") > 0) "logs/$filename"
+            else params.saveTrimmed ? filename : null
         }
 
     when:
@@ -434,15 +435,18 @@ process nugen_divtrimming {
 
     output:
     set val(name), file('*fq.gz') into divtrimmed_reads
+    file "*.stats.txt" into divtrimming_stats
 
     script:
     if (params.singleEnd) {
         """
-        python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py -1 ${trimmed}
+        python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py \\
+            -1 ${trimmed} -o ${name}.stats.txt > ${name}.summary.txt
         """
     } else {
         """
-        python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py -1 ${trimmed[0]} -2 ${trimmed[1]}
+        python \$NUGEN_RRBS_HOME/trimRRBSdiversityAdaptCustomers.py \\
+            -1 ${trimmed[0]} -2 ${trimmed[1]} -o ${name}.stats.txt > ${name}.summary.txt
         """
     }
 }
@@ -564,7 +568,7 @@ if(params.aligner == 'bismark') {
         }
 
         process nugen_deduplicate {
-            tag "${bam.baseName}"
+            tag "${name}"
             publishDir "${params.outdir}/NuGen_deduplicated", mode: 'copy',
                 saveAs: {filename ->
                     if (filename.indexOf(".txt") > 0) "logs/$filename"
@@ -584,9 +588,7 @@ if(params.aligner == 'bismark') {
             script:
             paired = !params.singleEnd ? "-2" : ''
             """
-            samtools view -h -@ ${task.cpus} $bam > ${name}.sam
-
-            python \$NUGEN_NODUP_HOME/nudup.py $paired -o ${name}.nugen_dedup ${name}.sam
+            python \$NUGEN_NODUP_HOME/nudup.py $paired -o ${name}.nugen_dedup ${bam}
             """
         }
     } else {
@@ -639,6 +641,10 @@ if(params.aligner == 'bismark') {
 
         script:
         comprehensive = params.comprehensive ? '--comprehensive --merge_non_CpG' : ''
+        ignore_r1 = params.ignore_r1 ? "--ignore ${params.ignore_r1}" : ''
+        ignore_r2 = params.ignore_r2 ? "--ignore ${params.ignore_r2}" : ''
+        ignore_3prime_r1 = params.ignore_3prime_r1 ? "--ignore_3prime ${params.ignore_3prime_r1}" : ''
+        ignore_3prime_r2 = params.ignore_3prime_r2 ? "--ignore_3prime_r2 ${params.ignore_3prime_r2}" : ''
         multicore = ''
         if (task.cpus){
             // Numbers based on Bismark docs
@@ -658,7 +664,7 @@ if(params.aligner == 'bismark') {
         if (params.singleEnd) {
             """
             bismark_methylation_extractor $comprehensive \\
-                $multicore $buffer \\
+                $multicore $buffer $ignore_r1 $ignore_3prime_r1 \\
                 --bedGraph \\
                 --counts \\
                 --gzip \\
@@ -669,9 +675,7 @@ if(params.aligner == 'bismark') {
         } else {
             """
             bismark_methylation_extractor $comprehensive \\
-                $multicore $buffer \\
-                --ignore_r2 2 \\
-                --ignore_3prime_r2 2 \\
+                $multicore $buffer $ignore_r1 $ignore_r2 $ignore_3prime_r1 $ignore_3prime_r2 \\
                 --bedGraph \\
                 --counts \\
                 --gzip \\
