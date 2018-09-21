@@ -642,7 +642,7 @@ if(params.aligner == 'bismark') {
         script:
         comprehensive = params.comprehensive ? '--comprehensive --merge_non_CpG' : ''
         ignore_r1 = params.ignore_r1 ? "--ignore ${params.ignore_r1}" : ''
-        ignore_r2 = params.ignore_r2 ? "--ignore ${params.ignore_r2}" : ''
+        ignore_r2 = params.ignore_r2 ? "--ignore_r2 ${params.ignore_r2}" : ''
         ignore_3prime_r1 = params.ignore_3prime_r1 ? "--ignore_3prime ${params.ignore_3prime_r1}" : ''
         ignore_3prime_r2 = params.ignore_3prime_r2 ? "--ignore_3prime_r2 ${params.ignore_3prime_r2}" : ''
         multicore = ''
