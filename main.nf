@@ -582,7 +582,7 @@ if(params.aligner == 'bismark') {
 
             output:
             file "*.nugen_dedup.sorted.dedup.bam" into bam_dedup, bam_dedup_qualimap
-            file "*.nugen_dedup.sorted.dedup.bam" into bam_markdup, bam_markdup_qualimap
+            file "*.nugen_dedup.sorted.markdup.bam" into bam_markdup, bam_markdup_qualimap
             file "*.nugen_dedup_dup_log.txt" into nugen_dedup_log
 
             script:
