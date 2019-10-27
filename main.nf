@@ -362,13 +362,11 @@ if (params.nugen) {
             """
             python \$NUGEN_RRBS_HOME/append_barcodes.py -1 ${reads} \\
                 -b ${barcode}
-
             """
         } else {
             """
             python \$NUGEN_RRBS_HOME/append_barcodes.py -1 ${reads[0]} \\
                 -2 ${reads[1]} -b ${barcode}
-
             """
         }
     }
